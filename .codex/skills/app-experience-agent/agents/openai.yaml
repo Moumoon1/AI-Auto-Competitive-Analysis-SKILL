@@ -1,0 +1,7 @@
+interface:
+  display_name: "App Experience Agent"
+  short_description: "Operate Android apps with Codex and ADB"
+  default_prompt: "Use $app-experience-agent to inspect a connected Android app, perform safe actions, capture evidence, and generate a report."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,3 @@
+.DS_Store
+.codex/skills/app-experience-agent/runs/*
+!.codex/skills/app-experience-agent/runs/.gitkeep
