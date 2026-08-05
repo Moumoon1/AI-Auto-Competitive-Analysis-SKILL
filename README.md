@@ -13,7 +13,7 @@
 ## 第一次运行
 
 ```sh
-# 在仓库根目录执行
+# 在项目根目录执行
 python3 .codex/skills/app-experience-agent/scripts/bootstrap.py --json
 ```
 
@@ -30,7 +30,7 @@ python3 .codex/skills/app-experience-agent/scripts/device.py status
 python3 .codex/skills/app-experience-agent/scripts/smoke_test.py
 ```
 
-启动一次走查：
+连接并授权手机后，启动一次走查：
 
 ```sh
 python3 .codex/skills/app-experience-agent/scripts/device.py start-run \
@@ -48,5 +48,8 @@ python3 .codex/skills/app-experience-agent/scripts/device.py tap --run RUN_DIR 5
 python3 .codex/skills/app-experience-agent/scripts/device.py screenshot --run RUN_DIR --title "设置页面" --reason "验证点击结果" --with-ui
 python3 .codex/skills/app-experience-agent/scripts/report.py --run RUN_DIR
 ```
+
+浏览长页面时，优先使用 `swipe-check`。它会在滑动后比较前后截图；如果页面
+没有实际变化，就丢弃重复截图并提示停止，不会强行生成“底部”证据。
 
 在 Codex 中使用本项目时，触发 `app-experience-agent` Skill，并要求它每次动作后重新读取截图。不要把示例坐标直接套用到别的设备或页面。

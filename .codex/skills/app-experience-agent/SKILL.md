@@ -30,6 +30,22 @@ agent-device snapshot -i --platform android --session SESSION --json
 
 Prefer `agent-device find TEXT click` or a returned semantic ref over guessed coordinates. Re-snapshot after every UI mutation. Never use a coordinate merely because it worked on an earlier screenshot.
 
+For scrolling, inspect the semantic snapshot first. If it shows an off-screen summary,
+a scrollable container, or a target below the fold, use the official semantic scroll
+command and then `snapshot`/`diff snapshot`:
+
+```sh
+agent-device scroll down --pixels 700 --duration-ms 300 --platform android --session SESSION --json
+agent-device diff snapshot -i --platform android --session SESSION --json
+```
+
+The semantic path can identify supported scroll containers and may stop at an edge
+without saving a duplicate screenshot. Do not treat `scrollable=true` alone as proof
+that more content remains: it means the container supports scrolling, not that the
+current position is above the bottom. If the semantic snapshot is sparse or the scroll
+result cannot establish whether new content appeared, use the bounded visual fallback
+in the long-page section below.
+
 ### Android compatibility preflight
 
 Run the preflight before a long exploration:
@@ -112,17 +128,23 @@ requesting full UI snapshots from a WebView-heavy screen.
 
 If the requested module continues below the fold, do not stop after the first screen.
 Use the current screenshot to identify a neutral content area, then perform one
-moderate vertical swipe and capture a fresh screenshot:
+moderate vertical swipe with the change check. The command compares the central
+content area with the previous evidence image and discards the new image when the
+page did not materially move:
 
 ```sh
-python3 scripts/device.py swipe --run RUN_DIR 540 1900 540 700 --duration-ms 450 --reason "查看会员中心下一段内容"
-python3 scripts/device.py screenshot --run RUN_DIR --title "会员中心下一屏" --reason "记录下方模块"
+python3 scripts/device.py swipe-check --run RUN_DIR 540 1900 540 700 --duration-ms 450 --wait-seconds 0.8 --title "会员中心下一屏" --reason "查看会员中心下一段内容"
 ```
 
-Repeat only while the page reveals new relevant modules. Stop at the bottom, after two
-materially unchanged screens, or before an action-oriented control if the next gesture
-could trigger it. Use at most 4–6 screens for a normal module review. Swiping is
-navigation, not permission to tap cards, claim benefits, buy, or activate anything.
+If the command returns `changed: false`, treat the page as unchanged or already at the
+bottom: do not save or label another screenshot. If it returns `changed: true`, keep the
+returned evidence image and continue only if it reveals a new relevant module. If it
+returns `changed: null`, compare the fresh screenshot manually and keep it only when
+there is genuinely new content. Two screens are enough when the second screen reaches
+the bottom; never force a third screen. Stop after two materially unchanged attempts or
+before an action-oriented control if the next gesture could trigger it. Use at most 4–6
+screens for a normal module review. Swiping is navigation, not permission to tap cards,
+claim benefits, buy, or activate anything.
 
 For a long page, label evidence as “首屏 / 中段 / 底部” and analyze modules across
 all captured screens. A report that claims to cover a page must say which sections were
@@ -262,7 +284,7 @@ reproduced with a confirmed target and a fresh screenshot. Do not leave the gene
 ## Action guidance
 
 - Use `launch --package PACKAGE` only when the user has named the target package.
-- Use `tap` for a visible target, `swipe` for scrolling, `input` for non-sensitive test text, and `key BACK` for reversible navigation.
+- Use semantic `agent-device scroll` for an exposed scroll container; use `swipe-check` as the visual fallback. Use `tap` for a visible target, `input` for non-sensitive test text, and `key BACK` for reversible navigation.
 - For long pages, scroll through neutral content areas and capture each newly revealed module; never reuse a swipe endpoint after the layout changes.
 - If semantic snapshot/find fails, do not silently downgrade to coordinate guessing. Retry once after the helper has exited, close and reopen the session, or ask the user to take over. A screenshot-derived coordinate is acceptable only when the exact current screen and target are unambiguous and the action is low-risk.
 - Use `ask_user` conceptually by stopping the workflow and asking in chat; do not invent an automatic confirmation for risky actions.

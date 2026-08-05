@@ -13,8 +13,14 @@ import shutil
 import struct
 import subprocess
 import time
+import zlib
 from pathlib import Path
 from typing import Any
+
+try:
+    from PIL import Image
+except ImportError:  # Pillow is optional; the bundled PNG fallback remains available.
+    Image = None  # type: ignore[assignment]
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
@@ -109,6 +115,117 @@ def png_dimensions(data: bytes) -> tuple[int | None, int | None]:
     if data[:8] != b"\x89PNG\r\n\x1a\n" or len(data) < 24:
         return None, None
     return struct.unpack(">II", data[16:24])
+
+
+def png_sample(path: Path, columns: int = 48, rows_count: int = 64) -> list[tuple[int, int, int]]:
+    """Decode a small RGB sample from an 8-bit, non-interlaced PNG."""
+    if Image is not None:
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            top = int(rgb.height * 0.08)
+            bottom = int(rgb.height * 0.92)
+            resampling = getattr(Image, "Resampling", Image).BILINEAR
+            reduced = rgb.crop((0, top, rgb.width, bottom)).resize((columns, rows_count), resampling)
+            return list(reduced.getdata())
+
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("不是 PNG 文件")
+    cursor = 8
+    width = height = bit_depth = color_type = interlace = None
+    compressed = bytearray()
+    while cursor + 8 <= len(data):
+        length = struct.unpack(">I", data[cursor:cursor + 4])[0]
+        kind = data[cursor + 4:cursor + 8]
+        payload = data[cursor + 8:cursor + 8 + length]
+        cursor += 12 + length
+        if kind == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(">IIBBBBB", payload)
+        elif kind == b"IDAT":
+            compressed.extend(payload)
+        elif kind == b"IEND":
+            break
+    if not width or not height or bit_depth != 8 or interlace != 0:
+        raise ValueError("只支持 8-bit 非交错 PNG")
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color_type)
+    if channels is None:
+        raise ValueError(f"不支持的 PNG 色彩类型: {color_type}")
+    raw = zlib.decompress(bytes(compressed))
+    stride = width * channels
+    decoded: list[bytearray] = []
+    offset = 0
+    previous = bytearray(stride)
+    for _ in range(height):
+        filter_type = raw[offset]
+        offset += 1
+        current = bytearray(raw[offset:offset + stride])
+        offset += stride
+        for index in range(stride):
+            left = current[index - channels] if index >= channels else 0
+            up = previous[index]
+            upper_left = previous[index - channels] if index >= channels else 0
+            if filter_type == 1:
+                current[index] = (current[index] + left) & 255
+            elif filter_type == 2:
+                current[index] = (current[index] + up) & 255
+            elif filter_type == 3:
+                current[index] = (current[index] + ((left + up) // 2)) & 255
+            elif filter_type == 4:
+                estimate = left + up - upper_left
+                distances = (abs(estimate - left), abs(estimate - up), abs(estimate - upper_left))
+                predictor = (left, up, upper_left)[distances.index(min(distances))]
+                current[index] = (current[index] + predictor) & 255
+            elif filter_type != 0:
+                raise ValueError(f"不支持的 PNG filter: {filter_type}")
+        decoded.append(current)
+        previous = current
+
+    top = max(0, int(height * 0.08))
+    bottom = min(height, int(height * 0.92))
+    sample: list[tuple[int, int, int]] = []
+    for row_index in range(rows_count):
+        y = min(bottom - 1, top + ((row_index * 2 + 1) * (bottom - top) // (rows_count * 2)))
+        scanline = decoded[y]
+        for column_index in range(columns):
+            x = min(width - 1, (column_index * 2 + 1) * width // (columns * 2))
+            offset = x * channels
+            if color_type == 0:
+                rgb = (scanline[offset],) * 3
+            elif color_type == 2:
+                rgb = tuple(scanline[offset:offset + 3])
+            elif color_type == 4:
+                rgb = (scanline[offset],) * 3
+            else:
+                rgb = tuple(scanline[offset:offset + 3])
+            sample.append(rgb)  # type: ignore[arg-type]
+    return sample
+
+
+def image_difference(first: Path, second: Path) -> float:
+    """Return normalized central-screen pixel difference in the range 0..1."""
+    first_sample = png_sample(first)
+    second_sample = png_sample(second)
+    if len(first_sample) != len(second_sample):
+        return 1.0
+    if not first_sample:
+        return 0.0
+    total = sum(
+        abs(left[0] - right[0]) + abs(left[1] - right[1]) + abs(left[2] - right[2])
+        for left, right in zip(first_sample, second_sample)
+    )
+    return total / (len(first_sample) * 3 * 255)
+
+
+def latest_evidence_image(run: Path) -> Path | None:
+    for metadata_path in reversed(sorted((run / "evidence").glob("*.json"))):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        image = run / "evidence" / str(metadata.get("image", ""))
+        if image.is_file():
+            return image
+    return None
 
 
 def device_screen_size() -> tuple[int, int]:
@@ -231,6 +348,33 @@ def cmd_swipe(args: argparse.Namespace) -> None:
     log_action(args, {"type": "swipe", "from": [args.x1, args.y1], "to": [args.x2, args.y2], "duration_ms": args.duration_ms, "reason": args.reason})
 
 
+def cmd_swipe_check(args: argparse.Namespace) -> None:
+    """Swipe once and retain a screenshot only when the central content changes."""
+    run = require_run(args.run)
+    previous = latest_evidence_image(run)
+    if previous is None:
+        raise SystemExit("swipe-check 需要先有一张当前页面截图")
+    adb("shell", "input", "swipe", str(args.x1), str(args.y1), str(args.x2), str(args.y2), str(args.duration_ms))
+    append_event(run, {"kind": "action", "type": "swipe", "from": [args.x1, args.y1], "to": [args.x2, args.y2], "duration_ms": args.duration_ms, "reason": args.reason})
+    time.sleep(args.wait_seconds)
+    candidate = capture(run, args.title, args.reason, args.with_ui)
+    try:
+        difference = image_difference(previous, candidate)
+    except (OSError, ValueError, struct.error, zlib.error) as exc:
+        append_event(run, {"kind": "scroll_check", "changed": None, "comparison_error": str(exc), "image": candidate.name})
+        print(json.dumps({"changed": None, "image": str(candidate), "message": "无法自动比较，请人工确认截图"}, ensure_ascii=False))
+        return
+    changed = difference > args.threshold
+    if not changed:
+        candidate_json = candidate.with_suffix(".json")
+        candidate_xml = candidate.with_suffix(".xml")
+        candidate.unlink(missing_ok=True)
+        candidate_json.unlink(missing_ok=True)
+        candidate_xml.unlink(missing_ok=True)
+    append_event(run, {"kind": "scroll_check", "changed": changed, "difference": round(difference, 6), "threshold": args.threshold, "discarded_image": None if changed else candidate.name})
+    print(json.dumps({"changed": changed, "difference": round(difference, 6), "threshold": args.threshold, "image": str(candidate) if changed else None}, ensure_ascii=False))
+
+
 def cmd_input(args: argparse.Namespace) -> None:
     if any(token in args.text.lower() for token in ("password", "otp", "验证码", "密码")):
         raise SystemExit("拒绝输入疑似敏感文本。请使用普通非敏感测试文本。")
@@ -299,6 +443,19 @@ def parser() -> argparse.ArgumentParser:
     swipe.add_argument("--duration-ms", type=int, default=450)
     swipe.add_argument("--reason", required=True)
     swipe.set_defaults(func=cmd_swipe)
+    swipe_check = sub.add_parser("swipe-check")
+    swipe_check.add_argument("--run", required=True)
+    swipe_check.add_argument("x1", type=int)
+    swipe_check.add_argument("y1", type=int)
+    swipe_check.add_argument("x2", type=int)
+    swipe_check.add_argument("y2", type=int)
+    swipe_check.add_argument("--duration-ms", type=int, default=450)
+    swipe_check.add_argument("--wait-seconds", type=float, default=0.8)
+    swipe_check.add_argument("--threshold", type=float, default=0.02)
+    swipe_check.add_argument("--title", required=True)
+    swipe_check.add_argument("--reason", required=True)
+    swipe_check.add_argument("--with-ui", action="store_true")
+    swipe_check.set_defaults(func=cmd_swipe_check)
     inp = sub.add_parser("input")
     inp.add_argument("--run", required=True)
     inp.add_argument("--text", required=True)
