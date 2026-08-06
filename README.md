@@ -23,7 +23,7 @@ python3 .codex/skills/app-experience-agent/scripts/bootstrap.py --json
 python3 .codex/skills/app-experience-agent/scripts/bootstrap.py --install
 ```
 
-连接并授权手机后，再运行：
+首次使用还需要在安卓手机上安装 Agent Device Snapshot Helper（不是只在电脑上安装工具），并在系统提示时点击“安装”。连接并授权手机后，再运行：
 
 ```sh
 python3 .codex/skills/app-experience-agent/scripts/device.py status
@@ -47,6 +47,10 @@ python3 .codex/skills/app-experience-agent/scripts/device.py screenshot --run RU
 python3 .codex/skills/app-experience-agent/scripts/device.py tap --run RUN_DIR 540 1200 --reason "点击当前截图中的设置入口"
 python3 .codex/skills/app-experience-agent/scripts/device.py screenshot --run RUN_DIR --title "设置页面" --reason "验证点击结果" --with-ui
 python3 .codex/skills/app-experience-agent/scripts/report.py --run RUN_DIR
+
+# 生成可交付的 HTML/Markdown 报告，截图会以内嵌缩略图显示，点击可查看大图
+python3 .codex/skills/app-experience-agent/scripts/finalize_report.py \\
+  --run RUN_DIR --output-dir outputs --name app-experience-report
 ```
 
 浏览长页面时，优先使用 `swipe-check`。它会在滑动后比较前后截图；如果页面

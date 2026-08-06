@@ -26,6 +26,9 @@ except ImportError:  # Pillow is optional; the bundled PNG fallback remains avai
 SKILL_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS = SKILL_DIR / "runs"
 _SERVER_PROCESS: subprocess.Popen[bytes] | None = None
+ADB_COMMAND_TIMEOUT = 8.0
+ADB_INPUT_TIMEOUT = 5.0
+ADB_BEST_EFFORT_TIMEOUT = 8.0
 
 
 def now() -> str:
@@ -33,10 +36,26 @@ def now() -> str:
 
 
 def adb_path() -> str:
-    value = os.environ.get("ADB", "adb")
-    if shutil.which(value) is None and not Path(value).exists():
-        raise SystemExit("找不到 adb。请安装 Android Platform Tools，或设置 ADB 环境变量。")
-    return value
+    configured = os.environ.get("ADB")
+    if configured:
+        if shutil.which(configured) or Path(configured).exists():
+            return configured
+        raise SystemExit(f"ADB 环境变量指向的路径不可用：{configured}")
+
+    on_path = shutil.which("adb")
+    if on_path:
+        return on_path
+
+    candidates = [
+        Path.home() / ".codex" / "android-platform-tools" / "platform-tools" / "adb",
+        Path.home() / "Library" / "Android" / "sdk" / "platform-tools" / "adb",
+        Path.home() / "Android" / "Sdk" / "platform-tools" / "adb",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    raise SystemExit("找不到 adb。请运行 bootstrap.py --install，或设置 ADB 环境变量。")
 
 
 def start_local_adb_server() -> None:
@@ -77,8 +96,15 @@ def stop_local_adb_server() -> None:
 
 def adb(*args: str, binary: bool = False) -> bytes | str:
     command = [adb_path(), *args]
+    timeout = ADB_COMMAND_TIMEOUT
+    if len(args) >= 2 and args[0] == "shell" and args[1] in {"input", "uiautomator"}:
+        timeout = ADB_INPUT_TIMEOUT
     try:
-        result = subprocess.run(command, check=True, capture_output=True)
+        result = subprocess.run(command, check=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"ADB 命令超时（{timeout:g} 秒），已终止本次操作: {' '.join(command)}"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode("utf-8", errors="replace").strip()
         raise SystemExit(f"ADB 命令失败: {' '.join(command)}\n{stderr}") from exc
@@ -87,7 +113,10 @@ def adb(*args: str, binary: bool = False) -> bytes | str:
 
 def adb_best_effort(*args: str) -> None:
     """Run a command whose client may be reaped after the device completes it."""
-    subprocess.run([adb_path(), *args], capture_output=True, timeout=12)
+    try:
+        subprocess.run([adb_path(), *args], capture_output=True, timeout=ADB_BEST_EFFORT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return
 
 
 def require_run(path: str) -> Path:

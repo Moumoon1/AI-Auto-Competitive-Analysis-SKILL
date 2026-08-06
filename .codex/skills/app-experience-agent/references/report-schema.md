@@ -5,6 +5,13 @@ helper, timing, and tool-retry details in the internal run log unless they creat
 visible product issue. Keep claims tied to evidence; use “未验证” when a page or
 control was not visited.
 
+The user-facing report is an analysis deliverable, not an operation log. Do not put
+raw taps, coordinates, retry history, installation steps, or a long action timeline in
+the main body unless they explain a visible product problem. Lead with the product's
+positioning, information architecture, functional value, UX strengths, weaknesses,
+and—when the scope is only one product—call the comparison section a “竞品分析基线”
+instead of implying a completed multi-product benchmark.
+
 Abstract volatile data by default. Replace account-dependent counts, balances, progress,
 dates, prices, coupon amounts, badges, usernames, and status values with categories such
 as “当前可享权益数量”“当前成长进度”“会员有效期”“优惠金额”. Preserve exact values
@@ -60,3 +67,10 @@ below-the-fold modules unless a fresh screenshot confirms them.
 
 List purchase/order/claim/activation/account-changing controls that were intentionally
 not clicked. End with the smallest next test that would increase coverage safely.
+
+## 7. Evidence presentation
+
+Place each useful screenshot next to the functional module or UX finding it supports;
+do not put all evidence in a detached gallery at the end. The HTML exporter should
+render these images as compact thumbnails and open the original image in a lightbox
+on click.
