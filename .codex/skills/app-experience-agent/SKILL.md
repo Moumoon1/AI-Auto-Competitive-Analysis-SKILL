@@ -28,7 +28,12 @@ agent-device open APP_OR_PACKAGE --platform android --serial SERIAL --session SE
 agent-device snapshot -i --platform android --session SESSION --json
 ```
 
-Prefer `agent-device find TEXT click` or a returned semantic ref over guessed coordinates. Re-snapshot after every UI mutation. Never use a coordinate merely because it worked on an earlier screenshot.
+Prefer a returned semantic ref from the current snapshot over guessed coordinates. Use
+`agent-device find TEXT click` only when there is no usable ref in the current snapshot;
+`find` can trigger another slow snapshot, so do not call it in a hot loop for every
+button. After a UI mutation, prefer one fresh screenshot with the direct ADB UI dump;
+request another semantic snapshot only when the direct path cannot identify the next
+target. Never use a coordinate merely because it worked on an earlier screenshot.
 
 For scrolling, inspect the semantic snapshot first. If it shows an off-screen summary,
 a scrollable container, or a target below the fold, use the official semantic scroll
@@ -46,14 +51,61 @@ current position is above the bottom. If the semantic snapshot is sparse or the 
 result cannot establish whether new content appeared, use the bounded visual fallback
 in the long-page section below.
 
+### Fast four-level inspection fallback
+
+When the semantic helper is unavailable, use this bounded order on the current screen:
+
+1. **Semantic snapshot:** one normal attempt, plus one recovery retry only.
+2. **Direct ADB UI dump:** capture the screenshot and Android UIAutomator tree together:
+
+   ```sh
+   python3 scripts/device.py screenshot --run RUN_DIR --with-ui --title "当前页面" --reason "读取截图和原生 UI 树"
+   ```
+
+   Inspect the XML saved beside that evidence image for exact `text`, `content-desc`,
+   `resource-id`, `clickable`, and `bounds`. This path is independent of the
+   agent-device semantic helper and is usually faster than repeatedly retrying it.
+3. **Local OCR:** only if the target is absent from the UI dump, run one exact query on
+   that same fresh screenshot. Do not run full-screen OCR repeatedly or OCR every
+   screenshot.
+4. **Human confirmation:** if the target is not an exact UI-dump match or a high-
+   confidence, unambiguous OCR match, stop before tapping and ask the user to confirm.
+
+The direct UI dump may still be sparse for a WebView, custom canvas, or a screen whose
+accessibility semantics are disabled. A sparse dump is a limitation to record, not a
+reason to guess coordinates. For a target found in XML, use its original pixel bounds
+and verify the same screenshot is still current before tapping. For OCR, require an
+exact or unambiguous query match and use the returned pixel bounds only for reversible
+navigation.
+
+Set a hard device-command budget: `device.py` terminates a stuck ADB input or UI dump
+within a few seconds. If a command times out, record the step as blocked, close the
+agent-device session if it owns automation, and continue with one fresh screenshot or
+stop. Never launch a second tap while the first ADB input command is still running.
+
 ### Android compatibility preflight
 
 Run the preflight before a long exploration:
 
 1. Confirm `adb devices -l` shows the authorized device.
-2. Confirm `agent-device open` succeeds.
-3. Confirm `agent-device snapshot -i` succeeds on the current screen.
-4. If snapshot fails, test a second screen or a simple system app before blaming the target app.
+2. Confirm the Android-side package `com.callstack.agentdevice.snapshothelper` is installed.
+3. Confirm `agent-device open` succeeds.
+4. Confirm `agent-device snapshot -i` succeeds on the current screen.
+5. If snapshot fails, test a second screen or a simple system app before blaming the target app.
+
+The desktop CLI and ADB are not enough for semantic inspection. On the Android phone,
+the user must install **Agent Device Snapshot Helper** when prompted, tap “安装”, and
+then rerun the read-only check. Keep the phone unlocked and accept the USB debugging
+authorization. Do not proceed to a long app exploration while this Android-side
+helper is missing; otherwise the run will fall back or stall before it produces useful
+semantic evidence.
+
+Keep this preflight bounded: one device check, one `open`, and at most one semantic
+snapshot retry. If the snapshot helper is not installed, finish the installation
+before opening the target app. If it is installed but the same ownership/forwarding
+error remains after one recovery attempt, switch to the visual fallback for the rest
+of the run and record the limitation. Do not spend a third round trip repeating the
+same helper failure.
 
 On OPPO/ColorOS, the Android snapshot helper may report automation-ownership release errors or lose its ADB forwarding port. Keep one `adb nodaemon server` alive across a sequence of `open`, `snapshot`, `find`, and `screenshot` commands. `AGENT_DEVICE_ANDROID_SNAPSHOT_HELPER_SESSION=0` can be tried as a recovery option, but it is not a guarantee.
 
@@ -63,6 +115,9 @@ Use this recovery order when the helper reports ownership, malformed-output, or 
 2. Force-stop only `com.callstack.agentdevice.snapshothelper` if it is installed.
 3. Reopen the target and retry one semantic snapshot with `AGENT_DEVICE_ANDROID_SNAPSHOT_HELPER_SESSION=0`.
 4. If the same error remains across two different apps, stop retrying and ask the user to reboot the phone, unlock it, reconnect USB, and re-accept USB debugging if prompted. Do not uninstall user apps, clear app data, or reset the phone as a recovery step.
+
+Do not reopen the target app repeatedly after a helper-only failure. A fresh ADB
+screenshot is enough to preserve evidence while the semantic path is unavailable.
 
 Treat a successful screenshot as evidence that the display transport works, not evidence that the semantic helper works.
 
@@ -74,7 +129,10 @@ snapshots, actions, and screenshots. Before starting another server, probe
 when the target app is already in the foreground. A failed `open` command is not proof
 that the app did not launch—verify with one screenshot or foreground-package check.
 
-Once per run is enough for the device check and helper preflight. If a WebView-heavy
+Once per run is enough for the device check and helper preflight. If the first semantic
+snapshot is slow (over roughly 5–8 seconds), treat that as a performance signal and
+switch to the direct ADB UI-dump path for the rest of the run instead of calling
+`find` repeatedly. If a WebView-heavy
 screen produces only a root `WebView` node, stop retrying full semantic snapshots and
 switch to the visual fallback. Record the semantic limitation in the report instead of
 spending multiple round trips on the same failure.
@@ -120,9 +178,9 @@ After an OCR-guided tap, capture one fresh screenshot and verify the destination
 Apple Vision OCR is unavailable, use the screenshot manually or stop and ask the user
 to take over; do not silently use stale or guessed coordinates.
 
-For speed, keep the loop bounded: one semantic snapshot attempt, otherwise one fresh
-screenshot plus OCR, one action, then one verification screenshot. Avoid repeatedly
-requesting full UI snapshots from a WebView-heavy screen.
+For speed, keep the loop bounded: one semantic snapshot attempt, one direct ADB UI dump,
+and at most one exact OCR query on the fresh screenshot. If none identifies the target,
+stop and ask for confirmation. Never use OCR as a continuous screen-reading loop.
 
 ### Cover long pages with bounded scrolling
 
@@ -180,19 +238,30 @@ The check is read-only. If Node.js/npm/npx are present but the tools are missing
 python3 scripts/bootstrap.py --install
 ```
 
-With the user's approval, `--install` installs the validated `agent-device@0.20.5`,
-the official `callstackincubator/agent-device` `dogfood` Skill, and Android Platform
-Tools/ADB. On macOS it uses Homebrew; on Debian/Ubuntu it uses `apt-get`; on Windows
-it uses WinGet when available. If no supported package manager is available, show the
-official download page and stop rather than claiming ADB is ready. Use `--install-adb`
-when only ADB is missing. A different explicitly approved agent-device version can be
-selected with `--agent-device-version VERSION`; the read-only check still requires
+With the user's approval, `--install` completes the setup in one pass:
+
+1. Install the validated `agent-device@0.20.5` into the user-local npm prefix
+   `~/.codex/npm-global`; never assume the system npm directory is writable.
+2. Download Google's official Android Platform Tools directly into
+   `~/.codex/android-platform-tools`; Homebrew, apt, and WinGet are optional and are
+   not prerequisites.
+3. Install the official `callstackincubator/agent-device` `dogfood` Skill globally for
+   Codex, then rerun the checks.
+
+The bundled scripts discover these user-local locations automatically, so a separate
+shell-profile edit is not required for the current run. Use `--install-adb` when only
+ADB is missing. A different explicitly approved agent-device version can be selected
+with `--agent-device-version VERSION`; the read-only check still requires
 `agent-device >= 0.14.0`.
 
 The installer never runs silently: invoke it only after the user approves the
 installation step. It cannot accept the phone's USB debugging prompt; the user must tap
 “允许 USB 调试”. After installation, rerun the read-only check and require an authorized
-device before exploration.
+device before exploration. The read-only check also verifies the Android-side
+`com.callstack.agentdevice.snapshothelper` package. If it reports “not installed on
+Android device”, pause and tell the user to install **Agent Device Snapshot Helper** on
+the phone, tap “安装” in the phone's installer prompt, and rerun the check. Installing
+`agent-device` or ADB on the Mac does not install this phone-side helper.
 
 When sharing this Skill, share the whole `app-experience-agent` folder. The recipient can
 run the bootstrap command to install the CLI and dogfood Skill locally; the CLI itself is
@@ -210,14 +279,22 @@ python3 scripts/device.py start-run --title "短任务名称" --task "任务描�
 
 The `start-run` command prints the run directory. Keep that path for every following command.
 
+For a normal module review, budget no more than 12 actions: one baseline capture,
+the shortest confirmed entry path, at most two meaningful scrolls, and one bounded
+check of a relevant subpage. Extra taps should only recover from a visibly confirmed
+misnavigation; do not explore every secondary link in the same run.
+
 ### 2. Inspect before acting
 
 ```sh
-python3 scripts/device.py screenshot --run RUN_DIR --title "初始页面" --reason "任务开始"
-python3 scripts/device.py dump-ui --run RUN_DIR
+python3 scripts/device.py screenshot --run RUN_DIR --with-ui --title "初始页面" --reason "任务开始"
 ```
 
-Inspect the returned screenshot in the Codex conversation. Use the UI dump when it contains useful text or bounds, but do not assume every app exposes a complete accessibility tree. Prefer a visible, reversible action. Use coordinates from the current screenshot only as an explicitly verified fallback; never reuse coordinates after a layout change, and never click when the current screen cannot be confirmed.
+Inspect the returned screenshot and its adjacent XML in the Codex conversation. Use the
+UI tree when it contains useful text or bounds, but do not assume every app exposes a
+complete accessibility tree. Prefer a visible, reversible action. Use coordinates from
+the current screenshot only as an explicitly verified fallback; never reuse coordinates
+after a layout change, and never click when the current screen cannot be confirmed.
 
 ### Coordinate safety: use original image pixels or screen ratios
 
@@ -273,6 +350,15 @@ using [references/report-schema.md](references/report-schema.md). At minimum, co
 - whether each item is confirmed, observed, or unverified;
 - the important unvisited modules or risky controls that were intentionally not tested.
 
+Treat the user-facing report as a product/function analysis deliverable, not a process
+transcript. Lead with positioning, information architecture, module value, UX strengths,
+UX weaknesses, and a comparison baseline when only one product was observed. Keep raw
+tap coordinates, retry history, installation details, and the full action timeline in
+the internal run log unless they explain a visible product issue. Place each useful
+evidence screenshot immediately next to the module or finding it supports; do not put
+all screenshots in a detached gallery at the end. The HTML exporter will keep these
+images compact and make them clickable for full-size viewing.
+
 Keep ADB/helper failures, retries, elapsed time, and coordinate details in the internal
 run log unless they directly cause a user-visible product problem. They are not part of
 the default product report.
@@ -281,12 +367,28 @@ Do not call an agent coordinate error an app UX defect unless the same behavior 
 reproduced with a confirmed target and a fresh screenshot. Do not leave the generated
 “请补充结论” placeholder in the final report.
 
+After completing the analysis, always export both report formats to the user-visible
+workspace output directory:
+
+```sh
+python3 scripts/finalize_report.py \
+  --run RUN_DIR \
+  --output-dir WORKSPACE/outputs \
+  --name app-experience-report
+```
+
+Verify that the two destination files exist, then include clickable links to both in
+the final response. The exporter treats the completed Markdown as canonical and embeds
+the evidence images directly into the HTML, so the HTML remains viewable when opened
+as a standalone local file. A report that exists only inside the internal run directory
+is not considered delivered.
+
 ## Action guidance
 
 - Use `launch --package PACKAGE` only when the user has named the target package.
 - Use semantic `agent-device scroll` for an exposed scroll container; use `swipe-check` as the visual fallback. Use `tap` for a visible target, `input` for non-sensitive test text, and `key BACK` for reversible navigation.
 - For long pages, scroll through neutral content areas and capture each newly revealed module; never reuse a swipe endpoint after the layout changes.
-- If semantic snapshot/find fails, do not silently downgrade to coordinate guessing. Retry once after the helper has exited, close and reopen the session, or ask the user to take over. A screenshot-derived coordinate is acceptable only when the exact current screen and target are unambiguous and the action is low-risk.
+- If semantic snapshot/find fails, use the four-level inspection fallback above. Do not silently downgrade to coordinate guessing. A screenshot-derived coordinate is acceptable only when the exact current screen and target are unambiguous and the action is low-risk; otherwise ask the user to take over.
 - Use `ask_user` conceptually by stopping the workflow and asking in chat; do not invent an automatic confirmation for risky actions.
 - Keep a small step budget, normally 12 actions for an exploratory run unless the user asks for more.
 - If two consecutive screenshots are materially unchanged after an action, do not repeat the same action blindly. Try one recovery action or stop and report the block.
@@ -303,6 +405,7 @@ Do not describe an unvisited page's UX, features, or defects as findings.
 
 - `scripts/device.py`: safe ADB wrapper, screenshots, UI dumps, run metadata, and action logging.
 - `scripts/report.py`: render a run's JSONL events and evidence into Markdown and standalone HTML.
+- `scripts/finalize_report.py`: copy the completed Markdown and HTML report into a user-visible output directory and verify the handoff.
 - `scripts/smoke_test.py`: offline verification that creates a fixture run and checks report generation without touching a phone.
 - `scripts/ocr.py` and `scripts/vision_ocr.swift`: local Apple Vision OCR fallback for text and pixel bounds when semantic UI inspection is incomplete.
 - `references/report-schema.md`: required structure for a complete, evidence-based report.
